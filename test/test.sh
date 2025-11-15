@@ -9,12 +9,12 @@ fi
 do_test() {
     echo "Test $@…"
     tmpdir="$(mktemp -d "/tmp/test.$1.XXXXXXXXXX")"
-    timeout --verbose 1 python3 pypdf_strreplace.py --output "$tmpdir"/output.pdf --input pdfs/"$2".pdf --search "$3" --replace "$4" > "$tmpdir"/messages.log
+    timeout --verbose 3 python pypdf_strreplace.py pdfs/"$2".pdf --output "$tmpdir"/output.pdf --search "$3" --replace "$4" > "$tmpdir"/messages.log
     gm convert -background white -extent 0x0 -density 150 +matte test/"$1".pdf "$tmpdir"/reference.tiff
     gm convert -background white -extent 0x0 -density 150 +matte "$tmpdir"/output.pdf "$tmpdir"/output.tiff
     pages_count=$(gm identify "$tmpdir"/output.tiff | wc -l)
     for i in $(seq 0 $(($pages_count - 1)))
-    do 
+    do
         if gm compare "$tmpdir"/reference.tiff[$i] "$tmpdir"/output.tiff[$i] -metric PAE -maximum-error 0 > "$tmpdir"/messages.log
         then
             echo "Page $i OK"

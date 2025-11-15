@@ -20,8 +20,7 @@ except ModuleNotFoundError:
     print("pypdf 5.x.x or newer is needed.")
     raise
 
-pypdf_major_version = int(pypdf.__version__.split(
-    ".")[0])  # pylint: disable=use-maxsplit-arg
+pypdf_major_version = int(pypdf.__version__.split(".", 1)[0])
 
 if pypdf_major_version < 5:
     raise ModuleNotFoundError(
@@ -168,7 +167,7 @@ class CharMap:
             }
             # TODO: find out if BOM needs to be added in case it was stripped (see decode)
             return TextStringObject(
-                text.translate(ExceptionalTranslator(map, self.ft["/BaseFont"])).encode(
+                text.translate(ExceptionalTranslator(_map, self.ft["/BaseFont"])).encode(
                     self.encoding
                 )
             )
@@ -180,7 +179,7 @@ class CharMap:
                 if not isinstance(v, str) or len(v) == 1
             }
             return ByteStringObject(
-                text.translate(ExceptionalTranslator(map, self.ft["/BaseFont"])).encode(
+                text.translate(ExceptionalTranslator(_map, self.ft["/BaseFont"])).encode(
                     self.encoding
                 )
             )
@@ -195,7 +194,7 @@ class CharMap:
 
 def get_char_maps(obj: Any, space_width: float = 200.0) -> Dict[str, CharMap]:
     """Get character maps for all fonts used on a page."""
-    char_maps = {}
+    _char_maps = {}
     _obj = obj
 
     while NameObject(PG.RESOURCES) not in _obj:
@@ -205,22 +204,22 @@ def get_char_maps(obj: Any, space_width: float = 200.0) -> Dict[str, CharMap]:
     resources_dict = cast(DictionaryObject, _obj[PG.RESOURCES])
 
     if "/Font" not in resources_dict:
-        return char_maps
+        return _char_maps
 
     for font_id in cast(DictionaryObject, resources_dict["/Font"]):
-        char_maps[font_id] = CharMap.from_char_map(
+        _char_maps[font_id] = CharMap.from_char_map(
             *build_char_map(font_id, space_width, obj)
         )
 
-    return char_maps
+    return _char_maps
 
 
 class Context:  # pylint: disable=too-few-public-methods
     """Context for text replacement operations."""
 
-    def __init__(self, char_maps: Dict[str, CharMap], font: str = None):
+    def __init__(self, _char_maps: Dict[str, CharMap], font: str = None):
         self.font = font
-        self.char_maps = char_maps
+        self.char_maps = _char_maps
 
     def clone_shared_char_maps(self):
         """Clone context with shared char maps."""
@@ -311,7 +310,7 @@ class PDFOperationTJ(PDFOperation):
         if len(operands) != 1:
             raise ValueError(
                 "PDFOperationTJ expects one non-empty Array of Array")
-        super().__init__(operands, "TJ", operation_context.clone_shared_charmaps())
+        super().__init__(operands, "TJ", operation_context.clone_shared_char_maps())
         self._infer_plain_text()
         object_types = set([operand.__class__ for operand in operands]) - set(
             [NumberObject.__class__]
@@ -327,13 +326,13 @@ class PDFOperationTJ(PDFOperation):
     def _infer_plain_text(self):
         for operand in self.get_relevant_operands():
             if isinstance(operand, NumberObject) or isinstance(operand, FloatObject):
-                halfspace = self.context.charmaps[self.context.font].halfspace
-                if operand < -halfspace:
+                half_space = self.context.char_maps[self.context.font].half_space
+                if operand < -half_space:
                     # interpret big horizontal adjustment as space.
                     # total guess. works for the xelatex sample.
                     operand.plain_text = " "
             else:
-                operand.plain_text = self.context.charmaps[self.context.font].decode(
+                operand.plain_text = self.context.char_maps[self.context.font].decode(
                     operand
                 )
 
@@ -374,14 +373,14 @@ class PDFOperationTj(PDFOperation):
             raise ValueError(
                 "PDFOperationTj expects one non-empty Array of TextStringObject"
             )
-        super().__init__(operands, "Tj", operation_context.clone_shared_charmaps())
+        super().__init__(operands, "Tj", operation_context.clone_shared_char_maps())
         self._infer_plain_text()
 
     def __str__(self):
         return f"„{self.get_relevant_operands()}“ {self.operator}"
 
     def _infer_plain_text(self):
-        self.operands[0].plain_text = self.context.charmaps[self.context.font].decode(
+        self.operands[0].plain_text = self.context.char_maps[self.context.font].decode(
             self.operands[0]
         )
 
@@ -509,89 +508,93 @@ def schedule_replacements(operations, matches, args_replace):
             if hasattr(operand, "plain_text"):
                 previous_length = len(text)
                 text += operand.plain_text
+
                 while matches or match:
                     if match:
-                        if len(text) >= match.end(0):
-                            # we have enough text to cover the end of the current match
-                            postfix = operand.plain_text[
-                                match.end(0) - previous_length:
-                            ].strip("\n")  # see prefix
-                            postfix = (
-                                match.re.sub(args_replace, postfix)
-                                if args_replace is not None
-                                else postfix
-                            )  # see prefix
-                            new_text = (
-                                prefix + match.expand(args_replace) + postfix
-                                if args_replace is not None
-                                else prefix + match.group(0) + postfix
-                            )
-                            first_operand.scheduled_change = Text(new_text)
-                            if operand != first_operand:
-                                # the match spans multiple operands
-                                # the first operand receives the replacement
-                                # text in its entirety (with postfix)
-                                # we do not need the current operand anymore.
-                                # mark current operand for deletion
-                                operand.scheduled_change = Delete()
-                            # we changed an operand in the operation the match begun in
-                            # this might be the current operation or a previous one
-                            first_operation.scheduled_change = Change()
-                            if operation != first_operation:
-                                # the match spans multiple operations
-                                # the first operations receives the replacement
-                                # text in its entirety (with postfix)
-                                # we do not need the current operations anymore.
-                                # mark current operations for deletion
-                                operation.scheduled_change = Delete()
-                                if operation.operator in ["TJ"]:
-                                    operand_changes = set(
-                                        [
-                                            c.__class__.__name__ if c else c
-                                            for c in [
-                                                getattr(
-                                                    op, "scheduled_change", None)
-                                                for op in operation.get_relevant_operands()
-                                            ]
-                                        ]
-                                    )
-                                    if operand_changes - set([Delete.__name__]):
-                                        # print(f"But wait: Not all the operation's
-                                        # operands are going to be deleted!
-                                        # The operation must be changed, not deleted.")
-                                        operation.scheduled_change = Change()
-                            # reset text gathering metadata for next match
-                            match = None
-                            first_operation = None
-                            first_operand = None
-                        else:
+                        if len(text) < match.end(0):
                             # match exists, but the current text does not reach the end
                             # quit looking here and get more text
                             break
+
+                        # we have enough text to cover the end of the current match
+                        postfix = operand.plain_text[
+                            match.end(0) - previous_length:
+                        ].strip("\n")  # see prefix
+
+                        postfix = (
+                            match.re.sub(args_replace, postfix)
+                            if args_replace is not None
+                            else postfix
+                        )  # see prefix
+
+                        new_text = (
+                            prefix + match.expand(args_replace) + postfix
+                            if args_replace is not None
+                            else prefix + match.group(0) + postfix
+                        )
+
+                        first_operand.scheduled_change = Text(new_text)
+                        if operand != first_operand:
+                            # the match spans multiple operands
+                            # the first operand receives the replacement
+                            # text in its entirety (with postfix)
+                            # we do not need the current operand anymore.
+                            # mark current operand for deletion
+                            operand.scheduled_change = Delete()
+                        # we changed an operand in the operation the match begun in
+                        # this might be the current operation or a previous one
+                        first_operation.scheduled_change = Change()
+
+                        if operation != first_operation:
+                            # the match spans multiple operations
+                            # the first operations receives the replacement
+                            # text in its entirety (with postfix)
+                            # we do not need the current operations anymore.
+                            # mark current operations for deletion
+                            operation.scheduled_change = Delete()
+                            if operation.operator in ["TJ"]:
+                                operand_changes = {
+                                    c.__class__.__name__ if c else c
+                                    for c in [
+                                        getattr(op, "scheduled_change", None)
+                                        for op in operation.get_relevant_operands()
+                                    ]
+                                }
+                                if operand_changes - set([Delete.__name__]):
+                                    # print(f"But wait: Not all the operation's
+                                    # operands are going to be deleted!
+                                    # The operation must be changed, not deleted.")
+                                    operation.scheduled_change = Change()
+                        # reset text gathering metadata for next match
+                        match = None
+                        first_operation = None
+                        first_operand = None
+
                     if matches:
-                        if len(text) > matches[0].start(0):
-                            match = matches[0]
-                            matches.pop(0)
-                            # newlines do not actually occur in the PDF.
-                            # they have been added by us for visual representation.
-                            # they must be removed here
-                            prefix = operand.plain_text[
-                                : match.start(0) - previous_length
-                            ].strip("\n")
-                            # one operand might contain multiple matches.
-                            # since we are focussing on the current match,
-                            # we must re-do the search and replace in the prefix
-                            prefix = (
-                                match.re.sub(args_replace, prefix)
-                                if args_replace is not None
-                                else prefix
-                            )
-                            first_operation = operation
-                            first_operand = operand
-                        else:
+                        if len(text) <= matches[0].start(0):
                             # match exists, but the current text does not reach the start
                             # quit looking here and get more text
                             break
+
+                        match = matches[0]
+                        matches.pop(0)
+                        # newlines do not actually occur in the PDF.
+                        # they have been added by us for visual representation.
+                        # they must be removed here
+                        prefix = operand.plain_text[
+                            : match.start(0) - previous_length
+                        ].strip("\n")
+                        # one operand might contain multiple matches.
+                        # since we are focussing on the current match,
+                        # we must re-do the search and replace in the prefix
+                        prefix = (
+                            match.re.sub(args_replace, prefix)
+                            if args_replace is not None
+                            else prefix
+                        )
+                        first_operation = operation
+                        first_operand = operand
+
             if (
                 operation.operator in ["TJ", "Tj"]
                 and first_operand is not None
@@ -605,6 +608,7 @@ def schedule_replacements(operations, matches, args_replace):
             # the current operation (might be Tf or something else entirely)
             # did not contain any text and must be removed to avoid confusion
             operation.scheduled_change = Delete()
+
         if (
             isinstance(getattr(operation, "scheduled_change", None), Delete)
             and operation.operator == "Td"
@@ -667,32 +671,35 @@ def replace_text(
         # else the indices would no longer match
         # we iterate over the list of high-level operations,
         # but we modify the pypdf low-level operations
-        for operation_index, operation in reversed(list(enumerate(operations))):
+        for operation_index, operation in enumerate(reversed(operations)):
             operation_change = getattr(operation, "scheduled_change", None)
-            if operation_change:
-                operation_change.apply(
-                    index=operation_index, collection=content.operations
-                )
-                if isinstance(operation_change, Delete):
-                    # print(f"Deleted: {operation}")
-                    pass
-                elif isinstance(operation_change, Cluster):
-                    # print(f"Moving together: {operation}")
-                    pass
-                else:
-                    # print(f"Before replacements: {operation}")
-                    for operand_index, operand in reversed(
-                        list(enumerate(operation.get_relevant_operands()))
-                    ):
-                        operand_change = getattr(
-                            operand, "scheduled_change", None)
-                        if operand_change:
-                            operand_change.apply(
-                                operation,
-                                operand_index,
-                                operation.get_relevant_operands(),
-                            )
-                    # print(f"After replacements:  {operation}")
+
+            if not operation_change:
+                continue  # Nothing to do for this operation
+
+            operation_change.apply(index=operation_index,
+                                   collection=content.operations)
+
+            if isinstance(operation_change, Delete):
+                # print(f"Deleted: {operation}")
+                continue  # Skip the rest of the iteration
+
+            if isinstance(operation_change, Cluster):
+                # print(f"Moving together: {operation}")
+                continue  # Skip the rest of the iteration
+
+            # print(f"Before replacements: {operation}")
+            for operand_index, operand in reversed(
+                list(enumerate(operation.get_relevant_operands()))
+            ):
+                operand_change = getattr(operand, "scheduled_change", None)
+                if operand_change:
+                    operand_change.apply(
+                        operation,
+                        operand_index,
+                        operation.get_relevant_operands(),
+                    )
+                # print(f"After replacements:  {operation}")
 
     # return amount of matches – which is hopefully the amount of replacements (mind the postfixes!)
     return len(matches)
@@ -700,9 +707,7 @@ def replace_text(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replace text in a PDF file.")
-    parser.add_argument(
-        "--input", type=str, required=True, help="Path to the input PDF file."
-    )
+    parser.add_argument("input", type=str, help="Path to the input PDF file.")
     parser.add_argument(
         "--output",
         type=str,
@@ -761,11 +766,11 @@ if __name__ == "__main__":
     reader = pypdf.PdfReader(args.input)
     writer = pypdf.PdfWriter()
     try:
-        for page_index, page in enumerate(reader.pages):
+        for page_index, page in enumerate(reader.pages, start=1):
             char_maps = get_char_maps(page)
             if args.search is None:
                 print(
-                    f"# These fonts are referenced on page {page_index + 1}:"
+                    f"# These fonts are referenced on page {page_index}:"
                     f" {', '.join([cm.ft['/BaseFont'] for cm in char_maps.values()])}"
                 )
             context = Context(char_maps)
